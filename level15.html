@@ -1,0 +1,35 @@
+<!doctype html>
+<html>
+    <head>
+        <title>Redirecting to Roblox...</title>
+        <meta http-equiv="refresh" content="8; url=about:blank" />
+        <script type="text/javascript">
+            function redirect() {
+                const urlParams = new URLSearchParams(window.location.search);
+                const gameInstanceId = urlParams.get("id");
+                const placeId = urlParams.get("placeId");
+
+                if (gameInstanceId && placeId) {
+                    const robloxUrl = `roblox://experiences/start?placeId=${placeId}&gameInstanceId=${gameInstanceId}`;
+                    document
+                        .querySelector('meta[http-equiv="refresh"]')
+                        .setAttribute("content", `8; url=${robloxUrl}`);
+                    document.getElementById("manual-link").href = robloxUrl;
+                } else {
+                    document.getElementById("content").innerHTML =
+                        "<h1>ERROR: Missing server information.</h1>";
+                }
+            }
+        </script>
+    </head>
+    <body onload="redirect()">
+        <div id="content" style="text-align: center; font-family: sans-serif">
+            <h1>Level 13 Access: Redirecting to the Roblox server...</h1>
+            <p>This may take up to 8 seconds. Please wait.</p>
+            <p>
+                If you are not redirected,
+                <a id="manual-link" href="#">click here to join</a>.
+            </p>
+        </div>
+    </body>
+</html>

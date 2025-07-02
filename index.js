@@ -1,0 +1,590 @@
+// =============================================
+// IMPORTS & SETUP
+// =============================================
+const express = require("express");
+const fetch = require("node-fetch");
+const session = require("express-session");
+const cookieParser = require("cookie-parser");
+const {
+  Client,
+  GatewayIntentBits,
+  REST,
+  Routes,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  ActivityType,
+  SlashCommandBuilder,
+  PermissionsBitField,
+  EmbedBuilder,
+} = require("discord.js");
+
+const app = express();
+app.set("trust proxy", 1);
+
+// =============================================
+//  LOAD SECRETS
+// =============================================
+const {
+  DISCORD_CLIENT_ID,
+  DISCORD_CLIENT_SECRET,
+  DISCORD_GUILD_ID,
+  DISCORD_BOT_TOKEN,
+  ROBLOX_PLACE_ID,
+  DONATOR_ROLE_ID,
+  BOOSTER_ROLE_ID,
+  LEVEL_15_ROLE_ID,
+  MEMBER_ROLE_ID,
+  BLACKLISTED_ROLE_ID,
+  APP_URL,
+  SESSION_SECRET,
+  REQUIRED_STATUS_TEXT,
+  STATUS_ROLE_ID,
+  GHOST_PING_CHANNEL_ID,
+  ADMIN_USER_IDS,
+  ADMIN_USERNAMES,
+  FORCE_STATUS_ROLE_IDS,
+  LOG_CHANNEL_ID,
+} = process.env;
+
+const ROLES = {
+  DONATOR: DONATOR_ROLE_ID,
+  BOOSTER: BOOSTER_ROLE_ID,
+  LEVEL_15: LEVEL_15_ROLE_ID,
+  MEMBER: MEMBER_ROLE_ID,
+};
+
+// =============================================
+//  EXPRESS WEB SERVER SETUP
+// =============================================
+app.use(cookieParser());
+app.use(
+  session({
+    secret: SESSION_SECRET,
+    resave: false,
+    saveUninitialized: true,
+    // ⭐️ MODIFIED: Added sameSite property for better cross-domain cookie handling
+    cookie: {
+      secure: true,
+      maxAge: 86400000, // Remember user for 1 day
+      sameSite: "none",
+    },
+  }),
+);
+app.use(express.static(__dirname));
+
+// --- WEB FUNCTIONS & ROUTES ---
+function getUserTier(userRoles = []) {
+  if (!Array.isArray(userRoles)) return "Denied";
+  if (userRoles.includes(BLACKLISTED_ROLE_ID)) return "Denied";
+  if (userRoles.includes(ROLES.DONATOR)) return "Donator";
+  if (userRoles.includes(ROLES.BOOSTER)) return "Booster";
+  if (userRoles.includes(ROLES.LEVEL_15)) return "Level15";
+  if (userRoles.includes(ROLES.MEMBER)) return "Member";
+  return "Denied";
+}
+
+function getPageForTier(tier) {
+  const tierPageMap = {
+    Donator: "donator.html",
+    Booster: "booster.html",
+    Level15: "level15.html",
+    Member: "member.html",
+    Denied: "denied.html",
+  };
+  return tierPageMap[tier] || "denied.html";
+}
+
+app.get("/join", (req, res) => {
+  const { id } = req.query;
+  if (!id) return res.status(400).send("Error: Server ID is missing.");
+  req.session.gameInstanceId = id;
+
+  if (req.session.user && req.session.user.roles) {
+    const tier = getUserTier(req.session.user.roles);
+    const page = getPageForTier(tier);
+    return res.redirect(`/${page}?id=${id}&placeId=${ROBLOX_PLACE_ID}`);
+  }
+  const discordAuthUrl = `https://discord.com/api/oauth2/authorize?client_id=${DISCORD_CLIENT_ID}&redirect_uri=${encodeURIComponent(APP_URL + "/callback")}&response_type=code&scope=identify%20guilds.members.read`;
+  res.redirect(discordAuthUrl);
+});
+
+app.get("/callback", async (req, res) => {
+  const { code } = req.query;
+  const gameInstanceId = req.session.gameInstanceId;
+  if (!code || !gameInstanceId)
+    return res.status(400).send("Error: Session invalid or login failed.");
+  try {
+    const tokenResponse = await fetch("https://discord.com/api/oauth2/token", {
+      method: "POST",
+      body: new URLSearchParams({
+        client_id: DISCORD_CLIENT_ID,
+        client_secret: DISCORD_CLIENT_SECRET,
+        grant_type: "authorization_code",
+        code,
+        redirect_uri: APP_URL + "/callback",
+      }),
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    });
+    const tokenData = await tokenResponse.json();
+    if (!tokenData.access_token) throw new Error("Failed to get access token.");
+    const memberResponse = await fetch(
+      `https://discord.com/api/users/@me/guilds/${DISCORD_GUILD_ID}/member`,
+      {
+        headers: { authorization: `Bearer ${tokenData.access_token}` },
+      },
+    );
+    const memberData = await memberResponse.json();
+    req.session.user = {
+      id: memberData.user.id,
+      username: memberData.user.username,
+      roles: memberData.roles || [],
+    };
+    const tier = getUserTier(req.session.user.roles);
+    const page = getPageForTier(tier);
+    res.redirect(`/${page}?id=${gameInstanceId}&placeId=${ROBLOX_PLACE_ID}`);
+  } catch (error) {
+    console.error("Error in callback:", error);
+    res.status(500).send("An internal server error occurred.");
+  }
+});
+
+app.get("/logout", (req, res) => {
+  req.session.destroy((err) => {
+    if (err) return res.status(500).send("Could not log you out.");
+    res.send(
+      '<body style="background-color:#2f3136;color:white;font-family:sans-serif;text-align:center;padding-top:50px;"><h1>You have been logged out successfully.</h1><p>You can now close this tab. To get your new roles, please click a new game link.</p></body>',
+    );
+  });
+});
+
+// =============================================
+//  DISCORD.JS BOT SETUP
+// =============================================
+const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.GuildPresences,
+  ],
+});
+
+const commands = [
+  {
+    name: "update-roles",
+    description:
+      "Checks your current roles and helps you update your web session.",
+  },
+  {
+    name: "status-role",
+    description: "Manually checks your status and assigns the status role.",
+  },
+  new SlashCommandBuilder()
+    .setName("blacklist-user")
+    .setDescription("Adds the blacklist role to a specified user.")
+    .addUserOption((option) =>
+      option
+        .setName("user")
+        .setDescription("The user to blacklist")
+        .setRequired(true),
+    )
+    .addStringOption((option) =>
+      option
+        .setName("reason")
+        .setDescription("The reason for the blacklist (optional)")
+        .setRequired(false),
+    )
+    .setDMPermission(false),
+  new SlashCommandBuilder()
+    .setName("unblacklist-user")
+    .setDescription("Removes the blacklist role from a specified user.")
+    .addUserOption((option) =>
+      option
+        .setName("user")
+        .setDescription("The user to unblacklist")
+        .setRequired(true),
+    )
+    .setDMPermission(false),
+  new SlashCommandBuilder()
+    .setName("force-status-role")
+    .setDescription("Forces a status role check on a specified user.")
+    .addUserOption((option) =>
+      option
+        .setName("user")
+        .setDescription("The user to check")
+        .setRequired(true),
+    )
+    .setDMPermission(false),
+].map((command) => (command.toJSON ? command.toJSON() : command));
+
+const rest = new REST({ version: "10" }).setToken(DISCORD_BOT_TOKEN);
+
+async function sendLog(embed) {
+  if (!LOG_CHANNEL_ID) return;
+  try {
+    const channel = await client.channels.fetch(LOG_CHANNEL_ID);
+    if (channel && channel.isTextBased()) {
+      await channel.send({ embeds: [embed] });
+    }
+  } catch (error) {
+    console.error("Failed to send log message:", error);
+  }
+}
+
+async function updateMemberStatusRole(member) {
+  if (!REQUIRED_STATUS_TEXT || !STATUS_ROLE_ID) return "not_configured";
+  if (member.user.bot) return "is_bot";
+  const hasRole = member.roles.cache.has(STATUS_ROLE_ID);
+  let hasStatus = false;
+  const presence = member.presence;
+  if (presence && presence.activities) {
+    const customStatus = presence.activities.find(
+      (a) => a.type === ActivityType.Custom,
+    );
+    if (
+      customStatus &&
+      customStatus.state &&
+      customStatus.state.includes(REQUIRED_STATUS_TEXT)
+    ) {
+      hasStatus = true;
+    }
+  }
+  if (hasStatus && !hasRole) {
+    try {
+      await member.roles.add(STATUS_ROLE_ID);
+      console.log(`Added status role to ${member.user.tag}`);
+      return "added";
+    } catch (error) {
+      console.error(`Failed to add role to ${member.user.tag}:`, error);
+      return "error";
+    }
+  } else if (!hasStatus && hasRole) {
+    try {
+      await member.roles.remove(STATUS_ROLE_ID);
+      console.log(`Removed status role from ${member.user.tag}`);
+      return "removed";
+    } catch (error) {
+      console.error(`Failed to remove role from ${member.user.tag}:`, error);
+      return "error";
+    }
+  }
+  return hasStatus ? "already_has_role" : "missing_status";
+}
+
+async function checkStatusRoles() {
+  if (!REQUIRED_STATUS_TEXT || !STATUS_ROLE_ID) {
+    console.log(
+      "Status check skipped: REQUIRED_STATUS_TEXT or STATUS_ROLE_ID not configured.",
+    );
+    return;
+  }
+  console.log("PERIODIC STATUS CHECK: Starting...");
+  try {
+    const guild = await client.guilds.fetch(DISCORD_GUILD_ID);
+    const members = await guild.members.fetch();
+    for (const member of members.values()) {
+      await updateMemberStatusRole(member);
+    }
+    console.log("PERIODIC STATUS CHECK: Finished.");
+  } catch (error) {
+    console.error("Error during periodic status check:", error);
+  }
+}
+
+client.on("ready", async () => {
+  console.log(`Discord bot logged in as ${client.user.tag}!`);
+  try {
+    console.log("Started refreshing application (/) commands.");
+    await rest.put(
+      Routes.applicationGuildCommands(DISCORD_CLIENT_ID, DISCORD_GUILD_ID),
+      { body: commands },
+    );
+    console.log("Successfully reloaded application (/) commands.");
+    await checkStatusRoles();
+    setInterval(checkStatusRoles, 5 * 60 * 1000);
+  } catch (error) {
+    console.error(error);
+  }
+});
+
+client.on("guildMemberAdd", async (member) => {
+  if (member.guild.id !== DISCORD_GUILD_ID) return;
+  if (!GHOST_PING_CHANNEL_ID) return;
+  try {
+    const channel = await member.guild.channels.fetch(GHOST_PING_CHANNEL_ID);
+    if (channel && channel.isTextBased()) {
+      const sentMessage = await channel.send(`<@${member.id}>`);
+      await sentMessage.delete();
+      console.log(`Successfully ghost-pinged new member ${member.user.tag}.`);
+    }
+  } catch (error) {
+    console.error("Error during ghost ping:", error);
+  }
+});
+
+// --- MAIN COMMAND HANDLER ---
+client.on("interactionCreate", async (interaction) => {
+  if (!interaction.isChatInputCommand() || !interaction.inGuild()) return;
+
+  const { commandName, user, member } = interaction;
+
+  if (commandName === "update-roles") {
+    const userRoles = member.roles.cache.map((r) => r.id);
+    const newTier = getUserTier(userRoles);
+    const logoutButton = new ButtonBuilder()
+      .setLabel("Logout & Reset Session")
+      .setURL(APP_URL + "/logout")
+      .setStyle(ButtonStyle.Link);
+    const row = new ActionRowBuilder().addComponents(logoutButton);
+    await interaction.reply({
+      content: `I've checked your roles and your current highest access tier is: **${newTier}**.\n\nTo apply this change, you must first log out of the website to clear your old session. Click the button below to log out, then click a new game link to get your new permissions.`,
+      components: [row],
+      ephemeral: true,
+    });
+  } else if (commandName === "status-role") {
+    const statusResult = await updateMemberStatusRole(member);
+    let replyMessage = "An unexpected error occurred.";
+    let logEmbed;
+
+    switch (statusResult) {
+      case "added":
+        replyMessage =
+          "Success! The status role has been added to your account.";
+        logEmbed = new EmbedBuilder()
+          .setColor(0x57f287)
+          .setTitle("Status Role Self-Updated (Added)");
+        break;
+      case "removed":
+        replyMessage =
+          "The status role has been removed as I could no longer find the required text in your status.";
+        logEmbed = new EmbedBuilder()
+          .setColor(0xed4245)
+          .setTitle("Status Role Self-Updated (Removed)");
+        break;
+      case "already_has_role":
+        replyMessage =
+          "You already have the status role and the required text in your status.";
+        break;
+      case "missing_status":
+        replyMessage = `I could not find "${REQUIRED_STATUS_TEXT}" in your custom status. Please update your status and try again.`;
+        break;
+      case "not_configured":
+        replyMessage = "This feature is not fully configured yet.";
+        logEmbed = new EmbedBuilder()
+          .setColor(0xfaa61a)
+          .setTitle("Status Role Check Failed")
+          .setDescription("Feature is not configured.");
+        break;
+      case "error":
+        replyMessage = "An error occurred while trying to update your roles.";
+        logEmbed = new EmbedBuilder()
+          .setColor(0xfaa61a)
+          .setTitle("Status Role Check Error")
+          .setDescription("Bot may be missing permissions.");
+        break;
+    }
+    await interaction.reply({ content: replyMessage, ephemeral: true });
+
+    if (logEmbed) {
+      logEmbed
+        .addFields({ name: "User", value: `${user.tag} (${user.id})` })
+        .setTimestamp();
+      await sendLog(logEmbed);
+    }
+  } else if (
+    commandName === "blacklist-user" ||
+    commandName === "unblacklist-user"
+  ) {
+    const allowedUserIds = (ADMIN_USER_IDS || "")
+      .split(",")
+      .filter((id) => id.trim() !== "");
+    let isAllowed = allowedUserIds.includes(user.id);
+
+    if (!isAllowed) {
+      return interaction.reply({
+        content: "You do not have permission to use this command.",
+        ephemeral: true,
+      });
+    }
+
+    if (!BLACKLISTED_ROLE_ID) {
+      return interaction.reply({
+        content: "Error: The `BLACKLISTED_ROLE_ID` has not been configured.",
+        ephemeral: true,
+      });
+    }
+
+    const targetUser = interaction.options.getUser("user");
+    const targetMember = await interaction.guild.members
+      .fetch(targetUser.id)
+      .catch(() => null);
+    if (!targetMember) {
+      return interaction.reply({
+        content: "Could not find that user in this server.",
+        ephemeral: true,
+      });
+    }
+
+    if (commandName === "blacklist-user") {
+      const reason =
+        interaction.options.getString("reason") || "No reason provided.";
+      try {
+        await targetMember.roles.add(BLACKLISTED_ROLE_ID);
+        await interaction.reply(
+          `Successfully blacklisted **${targetUser.tag}**.`,
+        );
+
+        const logEmbed = new EmbedBuilder()
+          .setColor(0xed4245)
+          .setTitle("User Blacklisted")
+          .addFields(
+            {
+              name: "Target User",
+              value: `${targetUser.tag} (${targetUser.id})`,
+              inline: true,
+            },
+            {
+              name: "Moderator",
+              value: `${user.tag} (${user.id})`,
+              inline: true,
+            },
+            { name: "Reason", value: reason },
+          )
+          .setTimestamp();
+        await sendLog(logEmbed);
+      } catch (error) {
+        console.error("Failed to apply blacklist role:", error);
+        await interaction.reply({
+          content: "I failed to apply the blacklist role.",
+          ephemeral: true,
+        });
+      }
+    } else {
+      // 'unblacklist-user'
+      if (!targetMember.roles.cache.has(BLACKLISTED_ROLE_ID)) {
+        return interaction.reply({
+          content: `**${targetUser.tag}** is not currently blacklisted.`,
+          ephemeral: true,
+        });
+      }
+      try {
+        await targetMember.roles.remove(BLACKLISTED_ROLE_ID);
+        await interaction.reply(
+          `Successfully unblacklisted **${targetUser.tag}**.`,
+        );
+
+        const logEmbed = new EmbedBuilder()
+          .setColor(0x57f287)
+          .setTitle("User Unblacklisted")
+          .addFields(
+            {
+              name: "Target User",
+              value: `${targetUser.tag} (${targetUser.id})`,
+              inline: true,
+            },
+            {
+              name: "Moderator",
+              value: `${user.tag} (${user.id})`,
+              inline: true,
+            },
+          )
+          .setTimestamp();
+        await sendLog(logEmbed);
+      } catch (error) {
+        console.error("Failed to remove blacklist role:", error);
+        await interaction.reply({
+          content: "I failed to remove the blacklist role.",
+          ephemeral: true,
+        });
+      }
+    }
+  } else if (commandName === "force-status-role") {
+    const authorizedRoleIds = (FORCE_STATUS_ROLE_IDS || "")
+      .split(",")
+      .filter((id) => id.trim() !== "");
+    const hasAuthorizedRole = authorizedRoleIds.some((id) =>
+      member.roles.cache.has(id),
+    );
+    const isAdmin = member.permissions.has(
+      PermissionsBitField.Flags.Administrator,
+    );
+
+    if (!hasAuthorizedRole && !isAdmin) {
+      return interaction.reply({
+        content: "You do not have permission to use this command.",
+        ephemeral: true,
+      });
+    }
+
+    const targetUser = interaction.options.getUser("user");
+    const targetMember = await interaction.guild.members
+      .fetch(targetUser.id)
+      .catch(() => null);
+    if (!targetMember) {
+      return interaction.reply({
+        content: "Could not find that user in this server.",
+        ephemeral: true,
+      });
+    }
+
+    const statusResult = await updateMemberStatusRole(targetMember);
+    let replyMessage = `An unexpected error occurred while checking ${targetUser.tag}.`;
+    let logEmbed;
+
+    switch (statusResult) {
+      case "added":
+        replyMessage = `Success! The status role has been added to **${targetUser.tag}**.`;
+        logEmbed = new EmbedBuilder()
+          .setColor(0x57f287)
+          .setTitle("Status Role Forced (Added)");
+        break;
+      case "removed":
+        replyMessage = `The status role has been removed from **${targetUser.tag}**.`;
+        logEmbed = new EmbedBuilder()
+          .setColor(0xed4245)
+          .setTitle("Status Role Forced (Removed)");
+        break;
+      case "already_has_role":
+        replyMessage = `**${targetUser.tag}** already has the status role.`;
+        break;
+      case "missing_status":
+        replyMessage = `**${targetUser.tag}** does not have the required status. Role not added.`;
+        break;
+      case "not_configured":
+        replyMessage = "This feature is not fully configured yet.";
+        break;
+      case "error":
+        replyMessage = `An error occurred while updating roles for **${targetUser.tag}**.`;
+        break;
+      case "is_bot":
+        replyMessage = `I cannot check the status of a bot, **${targetUser.tag}**.`;
+        break;
+    }
+
+    await interaction.reply({ content: replyMessage, ephemeral: true });
+
+    if (logEmbed) {
+      logEmbed
+        .addFields(
+          {
+            name: "Target User",
+            value: `${targetUser.tag} (${targetUser.id})`,
+            inline: true,
+          },
+          {
+            name: "Moderator",
+            value: `${user.tag} (${user.id})`,
+            inline: true,
+          },
+        )
+        .setTimestamp();
+      await sendLog(logEmbed);
+    }
+  }
+});
+
+// =============================================
+//  START EVERYTHING
+// =============================================
+app.listen(3000, () => console.log("Web server is running on port 3000!"));
+client.login(DISCORD_BOT_TOKEN);
