@@ -5,6 +5,8 @@ const express = require("express");
 const fetch = require("node-fetch");
 const session = require("express-session");
 const cookieParser = require("cookie-parser");
+const { createClient } = require("redis"); // ⭐️ ADDED
+const RedisStore = require("connect-redis").default; // ⭐️ ADDED
 const {
   Client,
   GatewayIntentBits,
@@ -38,6 +40,7 @@ const {
   BLACKLISTED_ROLE_ID,
   APP_URL,
   SESSION_SECRET,
+  REDIS_URL, // ⭐️ ADDED FOR REDIS
   REQUIRED_STATUS_TEXT,
   STATUS_ROLE_ID,
   GHOST_PING_CHANNEL_ID,
@@ -57,16 +60,31 @@ const ROLES = {
 // =============================================
 //  EXPRESS WEB SERVER SETUP
 // =============================================
+
+// ⭐️ MODIFIED: Initialize Redis Client and Store
+const redisClient = createClient({
+    url: REDIS_URL
+});
+redisClient.connect().catch(console.error);
+
+const redisStore = new RedisStore({
+    client: redisClient,
+    prefix: "sess:",
+});
+
+
 app.use(cookieParser());
+// ⭐️ MODIFIED: Use RedisStore for session management
 app.use(
   session({
+    store: redisStore,
     secret: SESSION_SECRET,
     resave: false,
-    saveUninitialized: true,
-    // ⭐️ MODIFIED: Added sameSite property for better cross-domain cookie handling
+    saveUninitialized: false, 
     cookie: {
       secure: true,
-      maxAge: 86400000, // Remember user for 1 day
+      httpOnly: true,
+      maxAge: 1000 * 60 * 60 * 24 * 7, // 1 week
       sameSite: "none",
     },
   }),
