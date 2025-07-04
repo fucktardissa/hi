@@ -8,22 +8,7 @@ const cookieParser = require("cookie-parser");
 const { createClient } = require("redis");
 const RedisStore = require("connect-redis").default;
 
-// All discord.js code is commented out
-/*
-const {
-  Client,
-  GatewayIntentBits,
-  REST,
-  Routes,
-  ActionRowBuilder,
-  ButtonBuilder,
-  ButtonStyle,
-  ActivityType,
-  SlashCommandBuilder,
-  PermissionsBitField,
-  EmbedBuilder,
-} = require("discord.js");
-*/
+// All discord.js code is commented out.
 
 const app = express();
 app.set("trust proxy", 1);
@@ -35,7 +20,7 @@ const {
   DISCORD_CLIENT_ID,
   DISCORD_CLIENT_SECRET,
   DISCORD_GUILD_ID,
-  // ... other variables
+  ROBLOX_PLACE_ID,
   BLACKLISTED_ROLE_ID,
   APP_URL,
   SESSION_SECRET,
@@ -105,15 +90,71 @@ function getPageForTier(tier) {
 
 // ⭐️ MODIFIED /join ROUTE
 app.get("/join", (req, res) => {
-    // This will now show a maintenance message instead of trying to contact Discord.
-    res.status(503).send(
-        '<body style="background-color:#2f3136;color:white;font-family:sans-serif;text-align:center;padding-top:50px;"><h1>Login Temporarily Disabled</h1><p>The login service is temporarily unavailable due to a rate limit from Discord. Please try again in a few hours.</p></body>'
-    );
+    const { id } = req.query;
+    const placeId = ROBLOX_PLACE_ID;
+
+    // This makes sure both pieces of info are present before redirecting.
+    if (!id || !placeId) {
+        return res.status(400).send("<h1>ERROR: Missing server or place information.</h1>");
+    }
+
+    // This redirects the user to your down.html page and, crucially,
+    // passes along the id and placeId so your script in that file can use them.
+    res.redirect(`/down.html?id=${id}&placeId=${placeId}`);
 });
 
-// The /callback route can stay, it just won't be used while /join is disabled.
+
+// The /callback route will not be used, but we can leave it for when you re-enable logins.
 app.get("/callback", async (req, res) => {
-  // ... (callback code remains here)
+    const { code } = req.query;
+    const gameInstanceId = req.session.gameInstanceId;
+    if (!code || !gameInstanceId)
+        return res.status(400).send("Error: Session invalid or login failed.");
+
+    try {
+        const tokenResponse = await fetch("https://discord.com/api/oauth2/token", {
+            method: "POST",
+            body: new URLSearchParams({
+                client_id: DISCORD_CLIENT_ID,
+                client_secret: DISCORD_CLIENT_SECRET,
+                grant_type: "authorization_code",
+                code,
+                redirect_uri: APP_URL + "/callback",
+            }),
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        });
+
+        if (!tokenResponse.ok) {
+            const errorBody = await tokenResponse.text();
+            throw new Error(`Discord API Error (${tokenResponse.status}): ${errorBody}`);
+        }
+
+        const tokenData = await tokenResponse.json();
+
+        if (!tokenData.access_token) {
+            throw new Error("Failed to get access token, tokenData from Discord is empty.");
+        }
+        
+        const memberResponse = await fetch(
+            `https://discord.com/api/users/@me/guilds/${DISCORD_GUILD_ID}/member`,
+            {
+                headers: { authorization: `Bearer ${tokenData.access_token}` },
+            }
+        );
+        const memberData = await memberResponse.json();
+        req.session.user = {
+            id: memberData.user.id,
+            username: memberData.user.username,
+            roles: memberData.roles || [],
+        };
+        const tier = getUserTier(req.session.user.roles);
+        const page = getPageForTier(tier);
+        res.redirect(`/${page}?id=${gameInstanceId}&placeId=${ROBLOX_PLACE_ID}`);
+
+    } catch (error) {
+        console.error("Error in callback:", error); 
+        res.status(500).send("An internal server error occurred. Check the bot's logs for details.");
+    }
 });
 
 
@@ -132,5 +173,3 @@ app.get("/logout", (req, res) => {
 //  START EVERYTHING
 // =============================================
 app.listen(3000, () => console.log("Web server is running on port 3000!"));
-
-// client.login is commented out.
