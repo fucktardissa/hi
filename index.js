@@ -5,8 +5,8 @@ const express = require("express");
 const fetch = require("node-fetch");
 const session = require("express-session");
 const cookieParser = require("cookie-parser");
-const { createClient } = require("redis"); // ⭐️ ADDED
-const RedisStore = require("connect-redis").default; // ⭐️ ADDED
+const { createClient } = require("redis");
+const RedisStore = require("connect-redis").default;
 const {
   Client,
   GatewayIntentBits,
@@ -40,7 +40,7 @@ const {
   BLACKLISTED_ROLE_ID,
   APP_URL,
   SESSION_SECRET,
-  REDIS_URL, // ⭐️ ADDED FOR REDIS
+  REDIS_URL,
   REQUIRED_STATUS_TEXT,
   STATUS_ROLE_ID,
   GHOST_PING_CHANNEL_ID,
@@ -49,6 +49,9 @@ const {
   FORCE_STATUS_ROLE_IDS,
   LOG_CHANNEL_ID,
 } = process.env;
+
+// ⭐️ FIX: Added a log at startup to verify the APP_URL environment variable.
+console.log(`[STARTUP] The APP_URL is currently set to: ${APP_URL}`);
 
 const ROLES = {
   DONATOR: DONATOR_ROLE_ID,
@@ -60,8 +63,6 @@ const ROLES = {
 // =============================================
 //  EXPRESS WEB SERVER SETUP
 // =============================================
-
-// ⭐️ MODIFIED: Initialize Redis Client and Store
 const redisClient = createClient({
     url: REDIS_URL
 });
@@ -72,15 +73,13 @@ const redisStore = new RedisStore({
     prefix: "sess:",
 });
 
-
 app.use(cookieParser());
-// ⭐️ MODIFIED: Use RedisStore for session management
 app.use(
   session({
     store: redisStore,
     secret: SESSION_SECRET,
     resave: false,
-    saveUninitialized: false, 
+    saveUninitialized: false,
     cookie: {
       secure: true,
       httpOnly: true,
@@ -132,6 +131,8 @@ app.get("/callback", async (req, res) => {
   const gameInstanceId = req.session.gameInstanceId;
   if (!code || !gameInstanceId)
     return res.status(400).send("Error: Session invalid or login failed.");
+
+  // ⭐️ FIX: Replaced the entire try/catch block for robust error handling.
   try {
     const tokenResponse = await fetch("https://discord.com/api/oauth2/token", {
       method: "POST",
@@ -144,13 +145,24 @@ app.get("/callback", async (req, res) => {
       }),
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
     });
+
+    // This block exposes the real error instead of giving a generic JSON error
+    if (!tokenResponse.ok) {
+      const errorBody = await tokenResponse.text();
+      throw new Error(`Discord API Error (${tokenResponse.status}): ${errorBody}`);
+    }
+
     const tokenData = await tokenResponse.json();
-    if (!tokenData.access_token) throw new Error("Failed to get access token.");
+
+    if (!tokenData.access_token) {
+        throw new Error("Failed to get access token, tokenData from Discord is empty.");
+    }
+    
     const memberResponse = await fetch(
       `https://discord.com/api/users/@me/guilds/${DISCORD_GUILD_ID}/member`,
       {
         headers: { authorization: `Bearer ${tokenData.access_token}` },
-      },
+      }
     );
     const memberData = await memberResponse.json();
     req.session.user = {
@@ -161,11 +173,13 @@ app.get("/callback", async (req, res) => {
     const tier = getUserTier(req.session.user.roles);
     const page = getPageForTier(tier);
     res.redirect(`/${page}?id=${gameInstanceId}&placeId=${ROBLOX_PLACE_ID}`);
+
   } catch (error) {
-    console.error("Error in callback:", error);
-    res.status(500).send("An internal server error occurred.");
+    console.error("Error in callback:", error); 
+    res.status(500).send("An internal server error occurred. Check the bot's logs for details.");
   }
 });
+
 
 app.get("/logout", (req, res) => {
   req.session.destroy((err) => {
@@ -183,7 +197,7 @@ const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMembers,
-    GatewayIntentBits.GuildPresences,
+    GatewayIntentBits.GuildPresences, // Required for status checks
   ],
 });
 
@@ -289,6 +303,9 @@ async function updateMemberStatusRole(member) {
   return hasStatus ? "already_has_role" : "missing_status";
 }
 
+// ⭐️ FIX: This entire function was removed because it's inefficient and causes memory crashes.
+// It has been replaced by the `client.on("presenceUpdate", ...)` event listener below.
+/*
 async function checkStatusRoles() {
   if (!REQUIRED_STATUS_TEXT || !STATUS_ROLE_ID) {
     console.log(
@@ -308,6 +325,7 @@ async function checkStatusRoles() {
     console.error("Error during periodic status check:", error);
   }
 }
+*/
 
 client.on("ready", async () => {
   console.log(`Discord bot logged in as ${client.user.tag}!`);
@@ -318,11 +336,21 @@ client.on("ready", async () => {
       { body: commands },
     );
     console.log("Successfully reloaded application (/) commands.");
-    await checkStatusRoles();
-    setInterval(checkStatusRoles, 5 * 60 * 1000);
+    
+    // ⭐️ FIX: Removed the inefficient periodic check.
+    // await checkStatusRoles();
+    // setInterval(checkStatusRoles, 5 * 60 * 1000);
+
   } catch (error) {
     console.error(error);
   }
+});
+
+// ⭐️ FIX: Added this new event listener. This is the efficient way to handle role updates.
+// It only runs when a user's presence changes, saving massive amounts of memory.
+client.on("presenceUpdate", async (oldPresence, newPresence) => {
+    if (!newPresence.member || newPresence.member.user.bot) return;
+    await updateMemberStatusRole(newPresence.member);
 });
 
 client.on("guildMemberAdd", async (member) => {
@@ -360,6 +388,9 @@ client.on("interactionCreate", async (interaction) => {
       ephemeral: true,
     });
   } else if (commandName === "status-role") {
+    // ⭐️ FIX: Defer reply to prevent timeout errors.
+    await interaction.deferReply({ ephemeral: true });
+
     const statusResult = await updateMemberStatusRole(member);
     let replyMessage = "An unexpected error occurred.";
     let logEmbed;
@@ -401,7 +432,8 @@ client.on("interactionCreate", async (interaction) => {
           .setDescription("Bot may be missing permissions.");
         break;
     }
-    await interaction.reply({ content: replyMessage, ephemeral: true });
+    // ⭐️ FIX: Use editReply after deferring.
+    await interaction.editReply({ content: replyMessage });
 
     if (logEmbed) {
       logEmbed
@@ -432,12 +464,15 @@ client.on("interactionCreate", async (interaction) => {
       });
     }
 
+    // ⭐️ FIX: Defer reply to prevent timeout errors.
+    await interaction.deferReply();
+
     const targetUser = interaction.options.getUser("user");
     const targetMember = await interaction.guild.members
       .fetch(targetUser.id)
       .catch(() => null);
     if (!targetMember) {
-      return interaction.reply({
+      return interaction.editReply({
         content: "Could not find that user in this server.",
         ephemeral: true,
       });
@@ -448,7 +483,7 @@ client.on("interactionCreate", async (interaction) => {
         interaction.options.getString("reason") || "No reason provided.";
       try {
         await targetMember.roles.add(BLACKLISTED_ROLE_ID);
-        await interaction.reply(
+        await interaction.editReply(
           `Successfully blacklisted **${targetUser.tag}**.`,
         );
 
@@ -472,7 +507,7 @@ client.on("interactionCreate", async (interaction) => {
         await sendLog(logEmbed);
       } catch (error) {
         console.error("Failed to apply blacklist role:", error);
-        await interaction.reply({
+        await interaction.editReply({
           content: "I failed to apply the blacklist role.",
           ephemeral: true,
         });
@@ -480,14 +515,14 @@ client.on("interactionCreate", async (interaction) => {
     } else {
       // 'unblacklist-user'
       if (!targetMember.roles.cache.has(BLACKLISTED_ROLE_ID)) {
-        return interaction.reply({
+        return interaction.editReply({
           content: `**${targetUser.tag}** is not currently blacklisted.`,
           ephemeral: true,
         });
       }
       try {
         await targetMember.roles.remove(BLACKLISTED_ROLE_ID);
-        await interaction.reply(
+        await interaction.editReply(
           `Successfully unblacklisted **${targetUser.tag}**.`,
         );
 
@@ -510,7 +545,7 @@ client.on("interactionCreate", async (interaction) => {
         await sendLog(logEmbed);
       } catch (error) {
         console.error("Failed to remove blacklist role:", error);
-        await interaction.reply({
+        await interaction.editReply({
           content: "I failed to remove the blacklist role.",
           ephemeral: true,
         });
@@ -534,14 +569,16 @@ client.on("interactionCreate", async (interaction) => {
       });
     }
 
+    // ⭐️ FIX: Defer reply to prevent timeout errors.
+    await interaction.deferReply({ ephemeral: true });
+
     const targetUser = interaction.options.getUser("user");
     const targetMember = await interaction.guild.members
       .fetch(targetUser.id)
       .catch(() => null);
     if (!targetMember) {
-      return interaction.reply({
+      return interaction.editReply({
         content: "Could not find that user in this server.",
-        ephemeral: true,
       });
     }
 
@@ -579,7 +616,7 @@ client.on("interactionCreate", async (interaction) => {
         break;
     }
 
-    await interaction.reply({ content: replyMessage, ephemeral: true });
+    await interaction.editReply({ content: replyMessage });
 
     if (logEmbed) {
       logEmbed
