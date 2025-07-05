@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Verification</title>
+    <script src="https://js.hcaptcha.com/1/api.js" async defer></script>
+    <style>
+        body { background-color:#2f3136; color:white; font-family:sans-serif; display:flex; justify-content:center; align-items:center; height:100vh; margin:0; }
+        .container { text-align:center; padding: 40px; border-radius: 8px; background-color: #36393f; }
+        button { background-color: #5865f2; color: white; border: none; padding: 10px 20px; border-radius: 5px; font-size: 16px; cursor: pointer; margin-top: 20px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Please verify you are human</h1>
+        <form action="/verify-captcha" method="POST">
+            <div class="h-captcha" data-sitekey="YOUR_SITE_KEY_HERE"></div>
+            <br />
+            <button type="submit">Continue</button>
+        </form>
+    </div>
+
+    <script>
+        // This script finds your site key from your server and puts it in the hCaptcha div
+        // This is a trick to avoid exposing your sitekey directly in the HTML file
+        async function fetchSiteKey() {
+            try {
+                const response = await fetch('/hcaptcha-sitekey');
+                const data = await response.json();
+                if (data.siteKey) {
+                    const captchaDiv = document.querySelector('.h-captcha');
+                    captchaDiv.setAttribute('data-sitekey', data.siteKey);
+                }
+            } catch (error) {
+                console.error('Could not fetch hCaptcha sitekey:', error);
+                document.querySelector('.container').innerHTML = '<h1>Error loading verification. Please try again.</h1>';
+            }
+        }
+        fetchSiteKey();
+    </script>
+</body>
+</html>
