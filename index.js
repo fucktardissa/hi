@@ -176,7 +176,6 @@ const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMembers,
-    // The Presence intent is still needed for the manual commands to read a user's status
     GatewayIntentBits.GuildPresences,
   ],
 });
@@ -297,8 +296,6 @@ client.on("ready", async () => {
   }
 });
 
-// NOTE: The automatic presenceUpdate listener has been removed as requested.
-
 client.on("guildMemberAdd", async (member) => {
   if (member.guild.id !== DISCORD_GUILD_ID) return;
   if (!GHOST_PING_CHANNEL_ID) return;
@@ -321,16 +318,61 @@ client.on("interactionCreate", async (interaction) => {
   const { commandName, user, member } = interaction;
 
   if (commandName === "update-roles") {
-    // ... (unchanged)
+    const userRoles = member.roles.cache.map((r) => r.id);
+    const newTier = getUserTier(userRoles);
+    const logoutButton = new ButtonBuilder()
+      .setLabel("Logout & Reset Session")
+      .setURL(APP_URL + "/logout")
+      .setStyle(ButtonStyle.Link);
+    const row = new ActionRowBuilder().addComponents(logoutButton);
+    await interaction.reply({
+      content: `I've checked your roles and your current highest access tier is: **${newTier}**.\n\nTo apply this change, you must first log out of the website to clear your old session. Click the button below to log out, then click a new game link to get your new permissions.`,
+      components: [row],
+      ephemeral: true,
+    });
   } else if (commandName === "status-role") {
     await interaction.deferReply({ ephemeral: true });
     const statusResult = await updateMemberStatusRole(member);
     let replyMessage = "An unexpected error occurred.";
-    // ... (logic for replyMessage)
+
+    // ⭐️ FIX: The full logic for handling the command result is now here.
+    switch (statusResult) {
+      case "added":
+        replyMessage = "Success! The status role has been added to your account.";
+        break;
+      case "removed":
+        replyMessage = "The status role has been removed as I could no longer find the required text in your status.";
+        break;
+      case "already_has_role":
+        replyMessage = "You already have the status role and the required text in your status.";
+        break;
+      case "missing_status":
+        replyMessage = `I could not find "${REQUIRED_STATUS_TEXT}" in your custom status. Please update your status and try again.`;
+        break;
+      case "not_configured":
+        replyMessage = "This feature is not fully configured yet.";
+        break;
+      case "error":
+        replyMessage = "An error occurred while trying to update your roles.";
+        break;
+    }
+    
     await interaction.editReply({ content: replyMessage });
 
   } else if (commandName === "force-status-role") {
-     // ... (permission checks)
+    const authorizedRoleIds = (FORCE_STATUS_ROLE_IDS || "")
+      .split(",")
+      .filter((id) => id.trim() !== "");
+    const hasAuthorizedRole = member.roles.cache.some((r) => authorizedRoleIds.includes(r.id));
+    const isAdmin = member.permissions.has(PermissionsBitField.Flags.Administrator);
+
+    if (!hasAuthorizedRole && !isAdmin) {
+      return interaction.reply({
+        content: "You do not have permission to use this command.",
+        ephemeral: true,
+      });
+    }
+
      await interaction.deferReply({ ephemeral: true });
      const targetUser = interaction.options.getUser("user");
      const targetMember = await interaction.guild.members.fetch(targetUser.id).catch(() => null);
@@ -339,14 +381,138 @@ client.on("interactionCreate", async (interaction) => {
      }
      const statusResult = await updateMemberStatusRole(targetMember);
      let replyMessage = `An unexpected error occurred while checking ${targetUser.tag}.`;
-     // ... (logic for replyMessage)
+
+    // ⭐️ FIX: The full logic for handling the command result is now here.
+    switch (statusResult) {
+      case "added":
+        replyMessage = `Success! The status role has been added to **${targetUser.tag}**.`;
+        break;
+      case "removed":
+        replyMessage = `The status role has been removed from **${targetUser.tag}**.`;
+        break;
+      case "already_has_role":
+        replyMessage = `**${targetUser.tag}** already has the status role.`;
+        break;
+      case "missing_status":
+        replyMessage = `**${targetUser.tag}** does not have the required status. Role not added.`;
+        break;
+      case "not_configured":
+        replyMessage = "This feature is not fully configured yet.";
+        break;
+      case "error":
+        replyMessage = `An error occurred while updating roles for **${targetUser.tag}**.`;
+        break;
+      case "is_bot":
+        replyMessage = `I cannot check the status of a bot, **${targetUser.tag}**.`;
+        break;
+    }
      await interaction.editReply({ content: replyMessage });
 
   } else if (
     commandName === "blacklist-user" ||
     commandName === "unblacklist-user"
   ) {
-    // ... (unchanged)
+    const allowedUserIds = (ADMIN_USER_IDS || "")
+      .split(",")
+      .filter((id) => id.trim() !== "");
+    let isAllowed = allowedUserIds.includes(user.id);
+
+    if (!isAllowed) {
+      return interaction.reply({
+        content: "You do not have permission to use this command.",
+        ephemeral: true,
+      });
+    }
+
+    if (!BLACKLISTED_ROLE_ID) {
+      return interaction.reply({
+        content: "Error: The `BLACKLISTED_ROLE_ID` has not been configured.",
+        ephemeral: true,
+      });
+    }
+
+    await interaction.deferReply({ ephemeral: true });
+
+    const targetUser = interaction.options.getUser("user");
+    const targetMember = await interaction.guild.members
+      .fetch(targetUser.id)
+      .catch(() => null);
+    if (!targetMember) {
+      return interaction.editReply({
+        content: "Could not find that user in this server.",
+      });
+    }
+
+    if (commandName === "blacklist-user") {
+      const reason =
+        interaction.options.getString("reason") || "No reason provided.";
+      try {
+        await targetMember.roles.add(BLACKLISTED_ROLE_ID);
+        await interaction.editReply(
+          `Successfully blacklisted **${targetUser.tag}**.`,
+        );
+
+        const logEmbed = new EmbedBuilder()
+          .setColor(0xed4245)
+          .setTitle("User Blacklisted")
+          .addFields(
+            {
+              name: "Target User",
+              value: `${targetUser.tag} (${targetUser.id})`,
+              inline: true,
+            },
+            {
+              name: "Moderator",
+              value: `${user.tag} (${user.id})`,
+              inline: true,
+            },
+            { name: "Reason", value: reason },
+          )
+          .setTimestamp();
+        await sendLog(logEmbed);
+      } catch (error) {
+        console.error("Failed to apply blacklist role:", error);
+        await interaction.editReply({
+          content: "I failed to apply the blacklist role.",
+        });
+      }
+    } else {
+      // 'unblacklist-user'
+      if (!targetMember.roles.cache.has(BLACKLISTED_ROLE_ID)) {
+        return interaction.editReply({
+          content: `**${targetUser.tag}** is not currently blacklisted.`,
+        });
+      }
+      try {
+        await targetMember.roles.remove(BLACKLISTED_ROLE_ID);
+        await interaction.editReply(
+          `Successfully unblacklisted **${targetUser.tag}**.`,
+        );
+
+        const logEmbed = new EmbedBuilder()
+          .setColor(0x57f287)
+          .setTitle("User Unblacklisted")
+          .addFields(
+            {
+              name: "Target User",
+              value: `${targetUser.tag} (${targetUser.id})`,
+              inline: true,
+            },
+            {
+              name: "Moderator",
+              value: `${user.tag} (${user.id})`,
+              inline: true,
+            },
+          )
+          .setTimestamp();
+        await sendLog(logEmbed);
+      } catch (error) {
+        console.error("Failed to remove blacklist role:", error);
+        await interaction.editReply({
+          content: "I failed to remove the blacklist role.",
+        });
+      }
+    }
   }
 });
 
