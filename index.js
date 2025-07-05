@@ -7,7 +7,7 @@ const session = require("express-session");
 const cookieParser = require("cookie-parser");
 const { createClient } = require("redis");
 const RedisStore = require("connect-redis").default;
-const fs = require('fs');
+const path = require("path");
 const {
   Client,
   GatewayIntentBits,
@@ -95,43 +95,28 @@ function getUserTier(userRoles = []) {
   return "Denied";
 }
 
-function getPageForTier(tier) {
-  const tierPageMap = {
-    Donator: "donator.html",
-    Booster: "booster.html",
-    Level15: "level15.html",
-    Member: "member.html",
-    Denied: "denied.html",
-  };
-  return tierPageMap[tier] || "denied.html";
-}
-
-// ⭐️ MODIFIED /join ROUTE WITH RANDOM BUTTON PAGE
+// ⭐️ MODIFIED /join ROUTE
 app.get("/join", (req, res) => {
-    // We don't need the game ID from the query here anymore,
-    // as it will be handled after the user logs in via the callback.
-    // However, we can store it in the session if needed.
     const { id } = req.query;
-    if (id) {
-        req.session.gameInstanceId = id;
+    if (!id) {
+        return res.status(400).send("Error: Server ID is missing.");
     }
 
-    // 1. Generate the unique Discord login URL
-    const discordAuthUrl = `https://discord.com/api/oauth2/authorize?client_id=${DISCORD_CLIENT_ID}&redirect_uri=${encodeURIComponent(APP_URL + "/callback")}&response_type=code&scope=identify%20guilds.members.read`;
+    req.session.gameInstanceId = id;
 
-    // 2. Read the ready.html file template
-    fs.readFile('ready.html', 'utf8', (err, html) => {
-        if (err) {
-            console.error("Could not read ready.html file:", err);
-            return res.status(500).send("An error occurred.");
-        }
-        // 3. Replace the placeholder with the real Discord URL
-        const modifiedHtml = html.replace('##DISCORD_URL##', discordAuthUrl);
-        // 4. Send the final page to the user
-        res.send(modifiedHtml);
-    });
+    // First, check if the user is already logged in from a previous visit
+    if (req.session.user && req.session.user.roles) {
+        console.log(`Returning user ${req.session.user.username} found. Sending to launch page.`);
+        // If they are logged in, send them straight to the launch page.
+        return res.redirect(`/launch.html?id=${id}&placeId=${ROBLOX_PLACE_ID}`);
+    }
+
+    // If they are a new user, send them to the Discord login page first.
+    const discordAuthUrl = `https://discord.com/api/oauth2/authorize?client_id=${DISCORD_CLIENT_ID}&redirect_uri=${encodeURIComponent(APP_URL + "/callback")}&response_type=code&scope=identify%20guilds.members.read`;
+    res.redirect(discordAuthUrl);
 });
 
+// ⭐️ MODIFIED /callback ROUTE
 app.get("/callback", async (req, res) => {
   const { code } = req.query;
   const gameInstanceId = req.session.gameInstanceId;
@@ -163,10 +148,10 @@ app.get("/callback", async (req, res) => {
       username: memberData.user.username,
       roles: memberData.roles || [],
     };
-    const tier = getUserTier(req.session.user.roles);
-    const page = getPageForTier(tier);
-
-    if (LOG_CHANNEL_ID) {
+    
+    // Log the successful join
+    if (LOG_CHANNEL_ID && client.isReady()) {
+        const tier = getUserTier(req.session.user.roles);
         const logEmbed = new EmbedBuilder()
             .setColor(0x5865F2)
             .setTitle("Web Link Joined")
@@ -178,8 +163,10 @@ app.get("/callback", async (req, res) => {
             .setTimestamp();
         sendLog(logEmbed);
     }
+    
+    // After successfully logging in, redirect every user to the launch page.
+    res.redirect(`/launch.html?id=${gameInstanceId}&placeId=${ROBLOX_PLACE_ID}`);
 
-    res.redirect(`/${page}?id=${gameInstanceId}&placeId=${ROBLOX_PLACE_ID}`);
   } catch (error) {
     console.error("Error in callback:", error);
     res.status(500).send("An internal server error occurred.");
