@@ -15,7 +15,6 @@ const {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
-  ActivityType,
   SlashCommandBuilder,
   PermissionsBitField,
   EmbedBuilder,
@@ -41,11 +40,8 @@ const {
   APP_URL,
   SESSION_SECRET,
   REDIS_URL,
-  REQUIRED_STATUS_TEXT,
-  STATUS_ROLE_ID,
   GHOST_PING_CHANNEL_ID,
   ADMIN_USER_IDS,
-  FORCE_STATUS_ROLE_IDS,
   LOG_CHANNEL_ID,
 } = process.env;
 
@@ -153,6 +149,21 @@ app.get("/callback", async (req, res) => {
     };
     const tier = getUserTier(req.session.user.roles);
     const page = getPageForTier(tier);
+
+    // ⭐️ LOGGING CODE ADDED HERE
+    if (LOG_CHANNEL_ID) {
+      const logEmbed = new EmbedBuilder()
+        .setColor(0x5865F2)
+        .setTitle("Web Link Joined")
+        .addFields(
+          { name: "User", value: `${memberData.user.username} (${memberData.user.id})`, inline: true },
+          { name: "Granted Tier", value: tier, inline: true },
+          { name: "Game Instance ID", value: gameInstanceId || "N/A", inline: false }
+        )
+        .setTimestamp();
+      sendLog(logEmbed);
+    }
+
     res.redirect(`/${page}?id=${gameInstanceId}&placeId=${ROBLOX_PLACE_ID}`);
   } catch (error) {
     console.error("Error in callback:", error);
@@ -176,19 +187,23 @@ const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMembers,
-    GatewayIntentBits.GuildPresences,
   ],
 });
+
+// ⭐️ ADDED CRASH PREVENTION
+client.on('error', (error) => {
+    console.error('An error occurred on the Discord client:', error);
+});
+process.on('unhandledRejection', error => {
+	console.error('Unhandled promise rejection:', error);
+});
+
 
 const commands = [
   {
     name: "update-roles",
     description:
       "Checks your current roles and helps you update your web session.",
-  },
-  {
-    name: "status-role",
-    description: "Manually checks your status and assigns the status role.",
   },
   new SlashCommandBuilder()
     .setName("blacklist-user")
@@ -216,16 +231,6 @@ const commands = [
         .setRequired(true),
     )
     .setDMPermission(false),
-  new SlashCommandBuilder()
-    .setName("force-status-role")
-    .setDescription("Forces a status role check on a specified user.")
-    .addUserOption((option) =>
-      option
-        .setName("user")
-        .setDescription("The user to check")
-        .setRequired(true),
-    )
-    .setDMPermission(false),
 ].map((command) => (command.toJSON ? command.toJSON() : command));
 
 const rest = new REST({ version: "10" }).setToken(DISCORD_BOT_TOKEN);
@@ -240,46 +245,6 @@ async function sendLog(embed) {
   } catch (error) {
     console.error("Failed to send log message:", error);
   }
-}
-
-async function updateMemberStatusRole(member) {
-  if (!REQUIRED_STATUS_TEXT || !STATUS_ROLE_ID) return "not_configured";
-  if (member.user.bot) return "is_bot";
-  const hasRole = member.roles.cache.has(STATUS_ROLE_ID);
-  let hasStatus = false;
-  const presence = member.presence;
-  if (presence && presence.activities) {
-    const customStatus = presence.activities.find(
-      (a) => a.type === ActivityType.Custom,
-    );
-    if (
-      customStatus &&
-      customStatus.state &&
-      customStatus.state.includes(REQUIRED_STATUS_TEXT)
-    ) {
-      hasStatus = true;
-    }
-  }
-  if (hasStatus && !hasRole) {
-    try {
-      await member.roles.add(STATUS_ROLE_ID);
-      console.log(`Added status role to ${member.user.tag}`);
-      return "added";
-    } catch (error) {
-      console.error(`Failed to add role to ${member.user.tag}:`, error);
-      return "error";
-    }
-  } else if (!hasStatus && hasRole) {
-    try {
-      await member.roles.remove(STATUS_ROLE_ID);
-      console.log(`Removed status role from ${member.user.tag}`);
-      return "removed";
-    } catch (error) {
-      console.error(`Failed to remove role from ${member.user.tag}:`, error);
-      return "error";
-    }
-  }
-  return hasStatus ? "already_has_role" : "missing_status";
 }
 
 client.on("ready", async () => {
@@ -330,84 +295,6 @@ client.on("interactionCreate", async (interaction) => {
       components: [row],
       ephemeral: true,
     });
-  } else if (commandName === "status-role") {
-    await interaction.deferReply({ ephemeral: true });
-    const statusResult = await updateMemberStatusRole(member);
-    let replyMessage = "An unexpected error occurred.";
-
-    // ⭐️ FIX: The full logic for handling the command result is now here.
-    switch (statusResult) {
-      case "added":
-        replyMessage = "Success! The status role has been added to your account.";
-        break;
-      case "removed":
-        replyMessage = "The status role has been removed as I could no longer find the required text in your status.";
-        break;
-      case "already_has_role":
-        replyMessage = "You already have the status role and the required text in your status.";
-        break;
-      case "missing_status":
-        replyMessage = `I could not find "${REQUIRED_STATUS_TEXT}" in your custom status. Please update your status and try again.`;
-        break;
-      case "not_configured":
-        replyMessage = "This feature is not fully configured yet.";
-        break;
-      case "error":
-        replyMessage = "An error occurred while trying to update your roles.";
-        break;
-    }
-    
-    await interaction.editReply({ content: replyMessage });
-
-  } else if (commandName === "force-status-role") {
-    const authorizedRoleIds = (FORCE_STATUS_ROLE_IDS || "")
-      .split(",")
-      .filter((id) => id.trim() !== "");
-    const hasAuthorizedRole = member.roles.cache.some((r) => authorizedRoleIds.includes(r.id));
-    const isAdmin = member.permissions.has(PermissionsBitField.Flags.Administrator);
-
-    if (!hasAuthorizedRole && !isAdmin) {
-      return interaction.reply({
-        content: "You do not have permission to use this command.",
-        ephemeral: true,
-      });
-    }
-
-     await interaction.deferReply({ ephemeral: true });
-     const targetUser = interaction.options.getUser("user");
-     const targetMember = await interaction.guild.members.fetch(targetUser.id).catch(() => null);
-     if (!targetMember) {
-         return interaction.editReply({ content: "Could not find that user in this server." });
-     }
-     const statusResult = await updateMemberStatusRole(targetMember);
-     let replyMessage = `An unexpected error occurred while checking ${targetUser.tag}.`;
-
-    // ⭐️ FIX: The full logic for handling the command result is now here.
-    switch (statusResult) {
-      case "added":
-        replyMessage = `Success! The status role has been added to **${targetUser.tag}**.`;
-        break;
-      case "removed":
-        replyMessage = `The status role has been removed from **${targetUser.tag}**.`;
-        break;
-      case "already_has_role":
-        replyMessage = `**${targetUser.tag}** already has the status role.`;
-        break;
-      case "missing_status":
-        replyMessage = `**${targetUser.tag}** does not have the required status. Role not added.`;
-        break;
-      case "not_configured":
-        replyMessage = "This feature is not fully configured yet.";
-        break;
-      case "error":
-        replyMessage = `An error occurred while updating roles for **${targetUser.tag}**.`;
-        break;
-      case "is_bot":
-        replyMessage = `I cannot check the status of a bot, **${targetUser.tag}**.`;
-        break;
-    }
-     await interaction.editReply({ content: replyMessage });
-
   } else if (
     commandName === "blacklist-user" ||
     commandName === "unblacklist-user"
