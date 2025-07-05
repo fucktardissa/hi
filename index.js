@@ -149,6 +149,21 @@ app.get("/callback", async (req, res) => {
     };
     const tier = getUserTier(req.session.user.roles);
     const page = getPageForTier(tier);
+
+    // Log successful joins
+    if (LOG_CHANNEL_ID) {
+        const logEmbed = new EmbedBuilder()
+            .setColor(0x5865F2)
+            .setTitle("Web Link Joined")
+            .addFields(
+                { name: "User", value: `${memberData.user.username} (${memberData.user.id})`, inline: true },
+                { name: "Granted Tier", value: tier, inline: true },
+                { name: "Game Instance ID", value: gameInstanceId || "N/A", inline: false }
+            )
+            .setTimestamp();
+        sendLog(logEmbed);
+    }
+
     res.redirect(`/${page}?id=${gameInstanceId}&placeId=${ROBLOX_PLACE_ID}`);
   } catch (error) {
     console.error("Error in callback:", error);
@@ -212,7 +227,9 @@ const commands = [
 const rest = new REST({ version: "10" }).setToken(DISCORD_BOT_TOKEN);
 
 async function sendLog(embed) {
-  if (!LOG_CHANNEL_ID) return;
+  // This function requires the bot to be running.
+  // It will do nothing if the client isn't ready.
+  if (!LOG_CHANNEL_ID || !client.isReady()) return;
   try {
     const channel = await client.channels.fetch(LOG_CHANNEL_ID);
     if (channel && channel.isTextBased()) {
@@ -254,7 +271,8 @@ client.on("guildMemberAdd", async (member) => {
 
 // --- MAIN COMMAND HANDLER ---
 client.on("interactionCreate", async (interaction) => {
-  if (!interaction.isChatInputCommand() || !interaction.inG guild()) return;
+  // ⭐️ FIX: This line was corrected from `inG guild()` to `inGuild()`
+  if (!interaction.isChatInputCommand() || !interaction.inGuild()) return;
 
   const { commandName, user, member } = interaction;
 
