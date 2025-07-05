@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Launching Roblox...</title>
+    <style>
+        body { background-color:#2f3136; color:white; font-family:sans-serif; margin:0; padding:20px; text-align:center; }
+        #page-container {
+            position: relative;
+            width: 90%;
+            height: 80vh;
+            border: 2px dashed #4f545c;
+            margin: 20px auto;
+        }
+        #join-button {
+            position: absolute;
+            padding: 15px 25px;
+            font-size: 18px;
+            cursor: pointer;
+            background-color: #5865f2;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            text-decoration: none;
+        }
+    </style>
+</head>
+<body onload="initialize()">
+    <h1>Verified!</h1>
+    <p>Click the button below to join the game.</p>
+    <div id="page-container">
+        <button id="join-button" onclick="launchGame()">Join Game</button>
+    </div>
+
+    <script>
+        let robloxUrl = '';
+
+        function randomizePosition() {
+            const button = document.getElementById('join-button');
+            const container = document.getElementById('page-container');
+            const containerWidth = container.clientWidth;
+            const containerHeight = container.clientHeight;
+            const buttonWidth = button.offsetWidth;
+            const buttonHeight = button.offsetHeight;
+            const randomLeft = Math.floor(Math.random() * (containerWidth - buttonWidth));
+            const randomTop = Math.floor(Math.random() * (containerHeight - buttonHeight));
+            button.style.left = randomLeft + 'px';
+            button.style.top = randomTop + 'px';
+        }
+
+        function launchGame() {
+            if (robloxUrl) {
+                window.location.href = robloxUrl;
+            } else {
+                alert('Error: Game information not found.');
+            }
+        }
+
+        function initialize() {
+            const urlParams = new URLSearchParams(window.location.search);
+            const gameInstanceId = urlParams.get("id");
+            const placeId = urlParams.get("placeId");
+
+            if (gameInstanceId && placeId) {
+                robloxUrl = `roblox://experiences/start?placeId=${placeId}&gameInstanceId=${gameInstanceId}`;
+                randomizePosition();
+            } else {
+                document.body.innerHTML = "<h1>ERROR: Missing server information.</h1>";
+            }
+        }
+    </script>
+</body>
+</html>
