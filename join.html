@@ -14,15 +14,14 @@
     <div class="container">
         <h1>Please verify you are human</h1>
         <form action="/verify-captcha" method="POST">
-            <div class="h-captcha" data-sitekey="YOUR_SITE_KEY_HERE"></div>
+            <div class="h-captcha" data-sitekey="YOUR_SITE_KEY_WILL_BE_INSERTED_HERE"></div>
             <br />
             <button type="submit">Continue</button>
         </form>
     </div>
 
     <script>
-        // This script finds your site key from your server and puts it in the hCaptcha div
-        // This is a trick to avoid exposing your sitekey directly in the HTML file
+        // This script fetches your site key from the server and injects it into the page
         async function fetchSiteKey() {
             try {
                 const response = await fetch('/hcaptcha-sitekey');
@@ -36,6 +35,7 @@
                 document.querySelector('.container').innerHTML = '<h1>Error loading verification. Please try again.</h1>';
             }
         }
+        // Run the function as soon as the page loads
         fetchSiteKey();
     </script>
 </body>
