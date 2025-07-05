@@ -336,7 +336,6 @@ async function updateMemberStatusRole(member) {
   return hasStatus ? "already_has_role" : "missing_status";
 }
 
-
 client.on("ready", async () => {
   console.log(`Discord bot logged in as ${client.user.tag}!`);
   try {
@@ -374,14 +373,23 @@ client.on("interactionCreate", async (interaction) => {
 
   if (commandName === "update-roles") {
     const userRoles = member.roles.cache.map((r) => r.id);
-    const newTier = getUserTier(userRoles);
+    const accessTier = getUserTier(userRoles);
+    const hasBypass = userRoles.includes(BYPASS_ROLE_ID);
+
+    let replyContent =
+      `I've checked your roles:\n\n` +
+      `> **Highest Access Tier:** \`${accessTier}\`\n` +
+      `> **CAPTCHA Bypass:** \`${hasBypass ? "Enabled" : "Disabled"}\`\n\n` +
+      `To apply any changes, you must first log out of the website to clear your old session.`;
+
     const logoutButton = new ButtonBuilder()
       .setLabel("Logout & Reset Session")
       .setURL(APP_URL + "/logout")
       .setStyle(ButtonStyle.Link);
     const row = new ActionRowBuilder().addComponents(logoutButton);
+
     await interaction.reply({
-      content: `I've checked your roles and your current highest access tier is: **${newTier}**.\n\nTo apply this change, you must first log out of the website to clear your old session. Click the button below to log out, then click a new game link to get your new permissions.`,
+      content: replyContent,
       components: [row],
       ephemeral: true,
     });
@@ -398,6 +406,7 @@ client.on("interactionCreate", async (interaction) => {
       case "error": replyMessage = "An error occurred while trying to update your roles."; break;
     }
     await interaction.editReply({ content: replyMessage });
+
   } else if (commandName === "force-status-role") {
     const authorizedRoleIds = (FORCE_STATUS_ROLE_IDS || "").split(",").filter(id => id.trim() !== "");
     const hasAuthorizedRole = member.roles.cache.some(r => authorizedRoleIds.includes(r.id));
@@ -424,6 +433,7 @@ client.on("interactionCreate", async (interaction) => {
       case "is_bot": replyMessage = `I cannot check the status of a bot, **${targetUser.tag}**.`; break;
     }
     await interaction.editReply({ content: replyMessage });
+
   } else if (commandName === "blacklist-user" || commandName === "unblacklist-user") {
     const allowedUserIds = (ADMIN_USER_IDS || "").split(",").filter((id) => id.trim() !== "");
     if (!allowedUserIds.includes(user.id)) {
@@ -439,9 +449,36 @@ client.on("interactionCreate", async (interaction) => {
       return interaction.editReply({ content: "Could not find that user in this server." });
     }
     if (commandName === "blacklist-user") {
-      // ... blacklist logic
-    } else {
-      // ... unblacklist logic
+        const reason = interaction.options.getString("reason") || "No reason provided.";
+        try {
+            await targetMember.roles.add(BLACKLISTED_ROLE_ID);
+            await interaction.editReply(`Successfully blacklisted **${targetUser.tag}**.`);
+            const logEmbed = new EmbedBuilder().setColor(0xed4245).setTitle("User Blacklisted").addFields(
+                { name: "Target User", value: `${targetUser.tag} (${targetUser.id})`, inline: true },
+                { name: "Moderator", value: `${user.tag} (${user.id})`, inline: true },
+                { name: "Reason", value: reason }
+            ).setTimestamp();
+            await sendLog(logEmbed);
+        } catch (error) {
+            console.error("Failed to apply blacklist role:", error);
+            await interaction.editReply({ content: "I failed to apply the blacklist role." });
+        }
+    } else { // unblacklist-user
+        if (!targetMember.roles.cache.has(BLACKLISTED_ROLE_ID)) {
+            return interaction.editReply({ content: `**${targetUser.tag}** is not currently blacklisted.` });
+        }
+        try {
+            await targetMember.roles.remove(BLACKLISTED_ROLE_ID);
+            await interaction.editReply(`Successfully unblacklisted **${targetUser.tag}**.`);
+            const logEmbed = new EmbedBuilder().setColor(0x57f287).setTitle("User Unblacklisted").addFields(
+                { name: "Target User", value: `${targetUser.tag} (${targetUser.id})`, inline: true },
+                { name: "Moderator", value: `${user.tag} (${user.id})`, inline: true }
+            ).setTimestamp();
+            await sendLog(logEmbed);
+        } catch (error) {
+            console.error("Failed to remove blacklist role:", error);
+            await interaction.editReply({ content: "I failed to remove the blacklist role." });
+        }
     }
   }
 });
