@@ -374,25 +374,23 @@ client.on("interactionCreate", async (interaction) => {
   if (commandName === "update-roles") {
     const userRoles = member.roles.cache.map((r) => r.id);
     const accessTier = getUserTier(userRoles);
-    const hasBypass = userRoles.includes(BYPASS_ROLE_ID);
 
-    let replyContent =
-      `I've checked your roles:\n\n` +
-      `> **Highest Access Tier:** \`${accessTier}\`\n` +
-      `> **CAPTCHA Bypass:** \`${hasBypass ? "Enabled" : "Disabled"}\`\n\n` +
-      `To apply any changes, you must first log out of the website to clear your old session.`;
+    // ⭐️ MODIFIED: The reply content no longer mentions the bypass status.
+    const replyContent = `I've checked your roles and your current highest access tier is: **${accessTier}**.\n\n` +
+                       `To apply any changes, you must first log out of the website to clear your old session.`;
 
     const logoutButton = new ButtonBuilder()
       .setLabel("Logout & Reset Session")
       .setURL(APP_URL + "/logout")
       .setStyle(ButtonStyle.Link);
     const row = new ActionRowBuilder().addComponents(logoutButton);
-
+    
     await interaction.reply({
       content: replyContent,
       components: [row],
       ephemeral: true,
     });
+    
   } else if (commandName === "status-role") {
     await interaction.deferReply({ ephemeral: true });
     const statusResult = await updateMemberStatusRole(member);
