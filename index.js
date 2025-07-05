@@ -7,7 +7,7 @@ const session = require("express-session");
 const cookieParser = require("cookie-parser");
 const { createClient } = require("redis");
 const RedisStore = require("connect-redis").default;
-const path = require("path");
+const fs = require('fs');
 const {
   Client,
   GatewayIntentBits,
@@ -50,9 +50,6 @@ const {
   ADMIN_USER_IDS,
   FORCE_STATUS_ROLE_IDS,
   LOG_CHANNEL_ID,
-  BYPASS_ROLE_ID,
-  HCAPTCHA_SITE_KEY,
-  HCAPTCHA_SECRET_KEY,
 } = process.env;
 
 const ROLES = {
@@ -109,51 +106,30 @@ function getPageForTier(tier) {
   return tierPageMap[tier] || "denied.html";
 }
 
+// ⭐️ MODIFIED /join ROUTE WITH RANDOM BUTTON PAGE
 app.get("/join", (req, res) => {
+    // We don't need the game ID from the query here anymore,
+    // as it will be handled after the user logs in via the callback.
+    // However, we can store it in the session if needed.
     const { id } = req.query;
-    if (!id) return res.status(400).send("Error: Server ID is missing.");
-    
-    req.session.gameInstanceId = id;
-
-    if (req.session.user && req.session.user.roles && req.session.user.roles.includes(BYPASS_ROLE_ID)) {
-        console.log(`User ${req.session.user.username} has bypass role. Skipping CAPTCHA.`);
-        const tier = getUserTier(req.session.user.roles);
-        const page = getPageForTier(tier);
-        return res.redirect(`/${page}?id=${id}&placeId=${ROBLOX_PLACE_ID}`);
+    if (id) {
+        req.session.gameInstanceId = id;
     }
 
-    res.sendFile(path.join(__dirname, 'join.html'));
-});
+    // 1. Generate the unique Discord login URL
+    const discordAuthUrl = `https://discord.com/api/oauth2/authorize?client_id=${DISCORD_CLIENT_ID}&redirect_uri=${encodeURIComponent(APP_URL + "/callback")}&response_type=code&scope=identify%20guilds.members.read`;
 
-app.get('/hcaptcha-sitekey', (req, res) => {
-    res.json({ siteKey: HCAPTCHA_SITE_KEY });
-});
-
-app.post("/verify-captcha", async (req, res) => {
-    try {
-        const captchaToken = req.body['h-captcha-response'];
-        if (!captchaToken) {
-            return res.status(400).send("<h1>CAPTCHA token missing.</h1>");
+    // 2. Read the ready.html file template
+    fs.readFile('ready.html', 'utf8', (err, html) => {
+        if (err) {
+            console.error("Could not read ready.html file:", err);
+            return res.status(500).send("An error occurred.");
         }
-        
-        const response = await fetch('https://api.hcaptcha.com/siteverify', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-            body: `response=${captchaToken}&secret=${HCAPTCHA_SECRET_KEY}`
-        });
-
-        const data = await response.json();
-
-        if (data.success) {
-            const discordAuthUrl = `https://discord.com/api/oauth2/authorize?client_id=${DISCORD_CLIENT_ID}&redirect_uri=${encodeURIComponent(APP_URL + "/callback")}&response_type=code&scope=identify%20guilds.members.read`;
-            res.redirect(discordAuthUrl);
-        } else {
-            res.status(403).send("<h1>CAPTCHA verification failed. Please go back and try again.</h1>");
-        }
-    } catch (error) {
-        console.error("CAPTCHA verification error:", error);
-        res.status(500).send("An error occurred during verification.");
-    }
+        // 3. Replace the placeholder with the real Discord URL
+        const modifiedHtml = html.replace('##DISCORD_URL##', discordAuthUrl);
+        // 4. Send the final page to the user
+        res.send(modifiedHtml);
+    });
 });
 
 app.get("/callback", async (req, res) => {
@@ -209,6 +185,7 @@ app.get("/callback", async (req, res) => {
     res.status(500).send("An internal server error occurred.");
   }
 });
+
 
 app.get("/logout", (req, res) => {
   req.session.destroy((err) => {
@@ -375,7 +352,6 @@ client.on("interactionCreate", async (interaction) => {
     const userRoles = member.roles.cache.map((r) => r.id);
     const accessTier = getUserTier(userRoles);
 
-    // ⭐️ MODIFIED: The reply content no longer mentions the bypass status.
     const replyContent = `I've checked your roles and your current highest access tier is: **${accessTier}**.\n\n` +
                        `To apply any changes, you must first log out of the website to clear your old session.`;
 
@@ -390,7 +366,6 @@ client.on("interactionCreate", async (interaction) => {
       components: [row],
       ephemeral: true,
     });
-    
   } else if (commandName === "status-role") {
     await interaction.deferReply({ ephemeral: true });
     const statusResult = await updateMemberStatusRole(member);
