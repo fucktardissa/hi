@@ -26,7 +26,6 @@ const app = express();
 app.set("trust proxy", 1);
 app.use(express.urlencoded({ extended: true }));
 
-
 // =============================================
 //  LOAD SECRETS
 // =============================================
@@ -41,6 +40,7 @@ const {
   LEVEL_15_ROLE_ID,
   MEMBER_ROLE_ID,
   BLACKLISTED_ROLE_ID,
+  BYPASS_ROLE_ID,
   APP_URL,
   SESSION_SECRET,
   REDIS_URL,
@@ -62,6 +62,8 @@ const ROLES = {
 // =============================================
 //  EXPRESS WEB SERVER SETUP
 // =============================================
+let logQueue = [];
+
 const redisClient = createClient({ url: REDIS_URL });
 redisClient.connect().catch(console.error);
 
@@ -95,7 +97,6 @@ function getUserTier(userRoles = []) {
   return "Denied";
 }
 
-// ⭐️ MODIFIED /join ROUTE
 app.get("/join", (req, res) => {
     const { id } = req.query;
     if (!id) {
@@ -104,10 +105,17 @@ app.get("/join", (req, res) => {
 
     req.session.gameInstanceId = id;
 
-    // First, check if the user is already logged in from a previous visit
+    // First, check if the user is already logged in
     if (req.session.user && req.session.user.roles) {
+        // Check for bypass role
+        if (BYPASS_ROLE_ID && req.session.user.roles.includes(BYPASS_ROLE_ID)) {
+            console.log(`Bypass user ${req.session.user.username} found. Redirecting directly to game.`);
+            const robloxUrl = `roblox://placeId=${ROBLOX_PLACE_ID}&gameInstanceId=${id}`;
+            return res.redirect(robloxUrl);
+        }
+        
+        // If they don't have bypass, send them to the launch page.
         console.log(`Returning user ${req.session.user.username} found. Sending to launch page.`);
-        // If they are logged in, send them straight to the launch page.
         return res.redirect(`/launch.html?id=${id}&placeId=${ROBLOX_PLACE_ID}`);
     }
 
@@ -116,7 +124,6 @@ app.get("/join", (req, res) => {
     res.redirect(discordAuthUrl);
 });
 
-// ⭐️ MODIFIED /callback ROUTE
 app.get("/callback", async (req, res) => {
   const { code } = req.query;
   const gameInstanceId = req.session.gameInstanceId;
@@ -136,6 +143,7 @@ app.get("/callback", async (req, res) => {
     });
     const tokenData = await tokenResponse.json();
     if (!tokenData.access_token) throw new Error("Failed to get access token.");
+    
     const memberResponse = await fetch(
       `https://discord.com/api/users/@me/guilds/${DISCORD_GUILD_ID}/member`,
       {
@@ -143,15 +151,16 @@ app.get("/callback", async (req, res) => {
       },
     );
     const memberData = await memberResponse.json();
+    const userRoles = memberData.roles || [];
+    
     req.session.user = {
       id: memberData.user.id,
       username: memberData.user.username,
-      roles: memberData.roles || [],
+      roles: userRoles,
     };
     
-    // Log the successful join
-    if (LOG_CHANNEL_ID && client.isReady()) {
-        const tier = getUserTier(req.session.user.roles);
+    if (LOG_CHANNEL_ID) {
+        const tier = getUserTier(userRoles);
         const logEmbed = new EmbedBuilder()
             .setColor(0x5865F2)
             .setTitle("Web Link Joined")
@@ -164,7 +173,12 @@ app.get("/callback", async (req, res) => {
         sendLog(logEmbed);
     }
     
-    // After successfully logging in, redirect every user to the launch page.
+    if (BYPASS_ROLE_ID && userRoles.includes(BYPASS_ROLE_ID)) {
+      console.log(`Bypass user ${memberData.user.username} logged in. Redirecting directly to game.`);
+      const robloxUrl = `roblox://placeId=${ROBLOX_PLACE_ID}&gameInstanceId=${gameInstanceId}`;
+      return res.redirect(robloxUrl);
+    }
+    
     res.redirect(`/launch.html?id=${gameInstanceId}&placeId=${ROBLOX_PLACE_ID}`);
 
   } catch (error) {
@@ -173,15 +187,26 @@ app.get("/callback", async (req, res) => {
   }
 });
 
-
 app.get("/logout", (req, res) => {
-  req.session.destroy((err) => {
-    if (err) return res.status(500).send("Could not log you out.");
-    res.send(
-      '<body style="background-color:#2f3136;color:white;font-family:sans-serif;text-align:center;padding-top:50px;"><h1>You have been logged out successfully.</h1><p>You can now close this tab. To get your new roles, please click a new game link.</p></body>',
-    );
+    if (LOG_CHANNEL_ID && req.session.user) {
+      const logEmbed = new EmbedBuilder()
+        .setColor(0xED4245) // Red
+        .setTitle("Web Link Logout")
+        .addFields({
+          name: "User",
+          value: `${req.session.user.username} (${req.session.user.id})`,
+        })
+        .setTimestamp();
+      sendLog(logEmbed);
+    }
+  
+    req.session.destroy((err) => {
+      if (err) return res.status(500).send("Could not log you out.");
+      res.send(
+        '<body style="background-color:#2f3136;color:white;font-family:sans-serif;text-align:center;padding-top:50px;"><h1>You have been logged out successfully.</h1><p>You can now close this tab. To get your new roles, please click a new game link.</p></body>',
+      );
+    });
   });
-});
 
 // =============================================
 //  DISCORD.JS BOT SETUP
@@ -246,20 +271,36 @@ const commands = [
         .setRequired(true),
     )
     .setDMPermission(false),
+  new SlashCommandBuilder()
+    .setName("unverify-user")
+    .setDescription("Logs a user out from their web session, forcing re-verification.")
+    .addUserOption((option) =>
+      option
+        .setName("user")
+        .setDescription("The user to unverify and log out")
+        .setRequired(true),
+    )
+    .setDMPermission(false),
 ].map((command) => (command.toJSON ? command.toJSON() : command));
 
 const rest = new REST({ version: "10" }).setToken(DISCORD_BOT_TOKEN);
 
 async function sendLog(embed) {
-  if (!LOG_CHANNEL_ID || !client.isReady()) return;
-  try {
-    const channel = await client.channels.fetch(LOG_CHANNEL_ID);
-    if (channel && channel.isTextBased()) {
-      await channel.send({ embeds: [embed] });
+    if (!LOG_CHANNEL_ID) return;
+  
+    if (!client.isReady()) {
+      logQueue.push(embed);
+      return;
     }
-  } catch (error) {
-    console.error("Failed to send log message:", error);
-  }
+  
+    try {
+      const channel = await client.channels.fetch(LOG_CHANNEL_ID);
+      if (channel && channel.isTextBased()) {
+        await channel.send({ embeds: [embed] });
+      }
+    } catch (error) {
+      console.error("Failed to send log message:", error);
+    }
 }
 
 async function updateMemberStatusRole(member) {
@@ -301,17 +342,36 @@ async function updateMemberStatusRole(member) {
 }
 
 client.on("ready", async () => {
-  console.log(`Discord bot logged in as ${client.user.tag}!`);
-  try {
-    console.log("Started refreshing application (/) commands.");
-    await rest.put(
-      Routes.applicationGuildCommands(DISCORD_CLIENT_ID, DISCORD_GUILD_ID),
-      { body: commands },
-    );
-    console.log("Successfully reloaded application (/) commands.");
-  } catch (error) {
-    console.error(error);
-  }
+    console.log(`Discord bot logged in as ${client.user.tag}!`);
+  
+    const readyEmbed = new EmbedBuilder()
+      .setColor(0x57f287) // Green
+      .setTitle("✅ Bot Online")
+      .setDescription(`Bot has successfully connected to Discord.`)
+      .setTimestamp();
+    sendLog(readyEmbed);
+  
+    if (logQueue.length > 0) {
+      console.log(`Sending ${logQueue.length} queued log messages...`);
+      const channel = await client.channels.fetch(LOG_CHANNEL_ID).catch(console.error);
+      if (channel && channel.isTextBased()) {
+        for (const embed of logQueue) {
+          await channel.send({ embeds: [embed] }).catch(console.error);
+        }
+      }
+      logQueue = [];
+    }
+  
+    try {
+      console.log("Started refreshing application (/) commands.");
+      await rest.put(
+        Routes.applicationGuildCommands(DISCORD_CLIENT_ID, DISCORD_GUILD_ID),
+        { body: commands },
+      );
+      console.log("Successfully reloaded application (/) commands.");
+    } catch (error) {
+      console.error(error);
+    }
 });
 
 client.on("guildMemberAdd", async (member) => {
@@ -340,7 +400,7 @@ client.on("interactionCreate", async (interaction) => {
     const accessTier = getUserTier(userRoles);
 
     const replyContent = `I've checked your roles and your current highest access tier is: **${accessTier}**.\n\n` +
-                       `To apply any changes, you must first log out of the website to clear your old session.`;
+                         `To apply any changes, you must first log out of the website to clear your old session.`;
 
     const logoutButton = new ButtonBuilder()
       .setLabel("Logout & Reset Session")
@@ -439,6 +499,57 @@ client.on("interactionCreate", async (interaction) => {
             console.error("Failed to remove blacklist role:", error);
             await interaction.editReply({ content: "I failed to remove the blacklist role." });
         }
+    }
+  } else if (commandName === "unverify-user") {
+    const allowedUserIds = (ADMIN_USER_IDS || "").split(",").filter((id) => id.trim() !== "");
+    if (!allowedUserIds.includes(user.id)) {
+      return interaction.reply({
+        content: "You do not have permission to use this command.",
+        ephemeral: true,
+      });
+    }
+
+    await interaction.deferReply({ ephemeral: true });
+    const targetUser = interaction.options.getUser("user");
+
+    let sessionsDeleted = 0;
+    try {
+      for await (const key of redisClient.scanIterator({ MATCH: "sess:*" })) {
+        const sessionDataString = await redisClient.get(key);
+        if (sessionDataString) {
+          try {
+            const sessionData = JSON.parse(sessionDataString);
+            if (sessionData.user && sessionData.user.id === targetUser.id) {
+              await redisClient.del(key);
+              sessionsDeleted++;
+            }
+          } catch (e) {
+            console.warn(`Could not parse session data for key ${key}.`);
+          }
+        }
+      }
+
+      if (sessionsDeleted > 0) {
+        await interaction.editReply(
+          `Successfully deleted **${sessionsDeleted}** web session(s) for **${targetUser.tag}**. They will be required to log in again.`,
+        );
+        const logEmbed = new EmbedBuilder()
+          .setColor(0xfeb842)
+          .setTitle("User Session Cleared (Unverified)")
+          .addFields(
+            { name: "Target User", value: `${targetUser.tag} (${targetUser.id})`, inline: true },
+            { name: "Moderator", value: `${user.tag} (${user.id})`, inline: true },
+          )
+          .setTimestamp();
+        await sendLog(logEmbed);
+      } else {
+        await interaction.editReply(
+          `No active web sessions were found for **${targetUser.tag}**. No action was needed.`,
+        );
+      }
+    } catch (error) {
+      console.error("Error during unverify command:", error);
+      await interaction.editReply("An error occurred while trying to access the session store.");
     }
   }
 });
